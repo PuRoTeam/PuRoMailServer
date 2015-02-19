@@ -1,0 +1,62 @@
+Amazon DynamoDB Metric:
+
+SuccessfulRequestLatency		The number of successful requests in the specified time period. By default, SuccessfulRequestLatency provides the elapsed time for successful calls
+
+UserErrors						The number of requests generating a 400 status code (likely indicating a client error) response in the specified time period.
+->utile in fase di test			View (namespace): All Metrics
+								Units: Count
+								Valid Statistics: Sum, SampleCount
+
+SystemErrors					The number of requests generating a 500 status code (likely indicating a server error) response in the specified time period.
+->utile in fase di test			View (namespace): AWS/DynamoDB, TableName
+								Units: Count
+								Valid Statistics: Sum, SampleCount	
+
+ThrottledRequests				The number of user requests that exceeded the preset provisioned throughput limits in the specified time period.
+->se la media supera una soglia(da trovare), aumento il throughput di x
+
+ProvisionedReadCapacityUnits	The amount of read capacity units provisioned for the table.
+ProvisionedWriteCapacityUnits	The amount of write capacity units provisioned for the table.
+
+####################################
+
+Amazon DynamoDB Dimensions:
+Amazon DynamoDB data can be retrieved along any of the following dimensions in the table below. Some metrics allow you to specify both a table name and operation, depending on the viewing option you specify.
+
+Dimension			Description
+
+TableName 			This dimension limits the data you request to a specific table. This value can be any table name for the current account.
+
+Operation			The operation corresponds to the Amazon DynamoDB service API, and can be one of the following:
+    					PutItem
+						DeleteItem
+						UpdateItem
+						GetItem
+						BatchGetItem
+						Scan
+						Query
+
+#####################################à
+
+Amazon EC2 Metrics:
+
+CPUUtilization	OK		The percentage of allocated EC2 compute units that are currently in use on the instance. This metric identifies the processing power required to run an application upon a selected instance.
+						Units: Percent
+
+DiskReadOps		NO		Completed read operations from all ephemeral disks available to the instance (if your instance uses Amazon EBS, see Amazon EBS Metrics.)This metric identifies the rate at which an application reads a disk. This can be used to determine the speed in which an application reads data from a hard disk.
+						Units: Count
+DiskWriteOps	NO		Completed write operations to all ephemeral disks available to the instance (if your instance uses Amazon EBS, see Amazon EBS Metrics.)This metric identifies the rate at which an application writes to a hard disk. This can be used to determine the speed in which an application saves data to a hard disk.
+						Units: Count
+DiskReadBytes	NO		Bytes read from all ephemeral disks available to the instance (if your instance uses Amazon EBS, see Amazon EBS Metrics.) This metric is used to determine the volume of the data the application reads from the hard disk of the instance. This can be used to determine the speed of the application.
+						Units: Bytes
+DiskWriteBytes	NO		Bytes written to all ephemeral disks available to the instance (if your instance uses Amazon EBS, see Amazon EBS Metrics.) This metric is used to determine the volume of the data the application writes onto the hard disk of the instance. This can be used to determine the speed of the application.
+						Units: Bytes
+->magari da analizzare durante i test
+
+NetworkIn		OK		The number of bytes received on all network interfaces by the instance. This metric identifies the volume of incoming network traffic to an application on a single instance.
+						Units: Bytes
+->se traffico entrante max, allora aggiungo una nuova istanza (misurare i bytes in condizioni normali)
+
+NetworkOut		OK		The number of bytes sent out on all network interfaces by the instance. This metric identifies the volume of outgoing network traffic to an application on a single instance.
+						Units: Bytes
+->se traffico uscente max, allora aggiungo una nuova istanza (misurare i bytes in condizioni normali)

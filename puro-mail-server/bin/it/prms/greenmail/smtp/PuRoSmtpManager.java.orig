@@ -1,0 +1,254 @@
+package it.prms.greenmail.smtp;
+
+import it.prms.greenmail.PuRoConfig;
+import it.prms.greenmail.imap.PuRoImapHostManager;
+import it.prms.greenmail.mail.MailAddress;
+import it.prms.greenmail.mail.MovingMessage;
+import it.prms.greenmail.user.PuRoMailUser;
+import it.prms.greenmail.user.PuRoUserManager;
+import it.prms.greenmail.user.UserException;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
+import java.util.Iterator;
+
+import javax.mail.Message;
+import javax.mail.MessagingException;
+
+import org.xbill.DNS.Lookup;
+import org.xbill.DNS.MXRecord;
+import org.xbill.DNS.Record;
+import org.xbill.DNS.TextParseException;
+import org.xbill.DNS.Type;
+
+public class PuRoSmtpManager {
+    private Incoming _incomingQueue;
+    private PuRoUserManager userManager;
+    private PuRoImapHostManager imapHostManager;
+    private PuRoConfig config;
+    
+    public PuRoSmtpManager(PuRoImapHostManager imapHostManager, PuRoUserManager userManager, PuRoConfig config) {
+    	_incomingQueue = new Incoming();    	
+    	this.imapHostManager = imapHostManager;
+        this.userManager = userManager;        
+        this.config = config;
+    }
+
+   //(*) smtp.libero.it non effettua mai un controllo sul sender
+	public String checkSender(SmtpState state, MailAddress sender) {
+        //always ok
+        return null;
+    }
+
+	//(*) smtp.libero.it verifica che il destinatario esista unicamente se esso appartiene al dominio libero.it
+	//(*) se non appartiene al dominio e successivamente non riesce ad inviare il messaggio, allora dovrebbe mandare una mail indietro al mittente
+    public String checkRecipient(SmtpState state, MailAddress rcpt) {
+    	
+        //MailAddress sender = state.getMessage().getReturnPath();
+        //return null;
+    	
+    	String err = "550 No such user here";
+    	
+    	/*String domain = rcpt.getHost();    	
+    	String server_domain = "puro-mail-server.tk"; //leggilo da file di configurazione
+    	    	
+    	if(domain.equalsIgnoreCase(server_domain))
+    	{
+    		User rcpt_user = userManager.getUserByEmail(rcpt.getEmail());
+    		
+    		if(rcpt_user != null) //user esistente
+    			return null;
+    		else
+    			return err;
+    	}
+    	else
+    	{
+    		return null;
+    	}*/
+    	
+    	if(true)
+    		return null;
+    	else    	
+    		return err; 
+    }
+  
+	public String checkData(SmtpState state) {
+
+        return null;
+    }
+        
+	public synchronized void send(SmtpState state) {
+        _incomingQueue.enqueue(state.getMessage());
+    }
+
+	public PuRoImapHostManager getImapHostManager() {
+		return imapHostManager;
+	}
+	
+	public PuRoUserManager getUserManager() {
+		return userManager;
+	}
+	
+	public PuRoConfig getConfig() {
+		return config;
+	}
+	
+    private class Incoming {
+
+        public void enqueue(MovingMessage msg) { //(*) TODO verificare che anche i destinatari in CC e CCn vengano considerati
+            Iterator iterator = msg.getRecipientIterator();
+            String tos = ""; //(*) insieme degli utenti destinatari
+            while (iterator.hasNext()) {
+                MailAddress username = (MailAddress) iterator.next();
+                //System.out.println(username.getEmail());
+                if (tos.length()>0) {
+                    tos+=",";
+                }
+                tos+=username; //(*) destinatario_1,destinatario_2,...,destinatario_n
+            }
+            try {
+                msg.getMessage().addRecipients(Message.RecipientType.TO,tos); //(*) aggiungo tutti i destinatario al messaggio
+            } catch (MessagingException e) {
+                throw new RuntimeException(e);
+            }
+            iterator = msg.getRecipientIterator();
+            while (iterator.hasNext()) {
+                MailAddress username = (MailAddress) iterator.next();
+                if(username.getHost().equals(config.getDomainName())){
+                	handle(msg, username);//(*) consegna il messaggio ad ogni utente destinatario
+                }else{
+                	handleExt(msg, username);
+                }
+            }
+        }
+
+        //richiamare config.getDomainName()
+        private void handle(MovingMessage msg, MailAddress mailAddress) {
+            try {
+                try {
+                    PuRoMailUser user = userManager.getUser(mailAddress.getEmail());
+                    if (null != user) {
+                    	user.deliver(msg);                        
+                    }      
+                } catch (UserException e) {
+                    throw new RuntimeException(e);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+                throw new RuntimeException(e);
+            }
+
+            msg.releaseContent();
+        }
+        
+        private void handleExt(MovingMessage msg, MailAddress mailAddress) {
+        	/*
+        	 * MAIL FROM:<mittente>
+        	 * RCPT TO:<destinatario1>
+        	 * RCPT TO:<destinatario2>
+        	 * ....
+        	 * DATA 
+        	 * QUIT
+        	 */
+        	
+    		Lookup lookup;
+    		Record [] records;
+    		
+    		Socket socket = null;
+	        PrintWriter out = null;
+	        OutputStream outData = null;
+	        BufferedReader in = null;
+	        
+			try {
+				lookup = new Lookup(mailAddress.getHost(), Type.MX);
+				records = lookup.run();
+	    		
+	    		if(records != null) {
+	    			MXRecord mx = (MXRecord) records[0];
+	    			    			
+    	            socket = new Socket(mx.getTarget().toString(), 25);	//potrebbe non restituire un target giusto!!!
+    				//socket = new Socket("151.1.108.67", 25);	//potrebbe non restituire un target giusto!!!
+    	                	            
+    	            out = new PrintWriter(socket.getOutputStream(), true);
+    	            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+    	            outData = socket.getOutputStream();
+    	            checkReply(in.readLine());
+    	            out.println("HELO PuRo Mail Server");
+    	            checkReply(in.readLine());
+    	            
+    	            out.println("MAIL FROM:<"+mailAddress.getEmail()+">");
+    	            checkReply(in.readLine());
+    	            
+    	        	for(int j=0; j<msg.getToAddresses().size(); ++j){
+    	        		out.println("RCPT TO:<"+msg.getToAddresses().get(j)+">");
+    	        		checkReply(in.readLine());
+    	        	}
+    	        	
+    	        	out.println("DATA");
+    	        	checkReply(in.readLine());
+    	        	    	        	
+    			    msg.getMessage().writeTo(outData); //Forse problemi con outputstream
+    			    
+    			    out.println();
+    	        	out.println(".");
+    	        	checkReply(in.readLine());
+    	        	
+    	        	out.println("QUIT");
+    	        	checkReply(in.readLine());
+	    	
+	    			out.close();
+	    			if(socket != null && !socket.isClosed()) {
+	    				socket.close();
+	    	        }
+	    		}
+	    		else
+	    			throw new ExtSmtpConnException();
+	    		
+			} catch (TextParseException e) {
+				e.printStackTrace();
+			} catch (SocketTimeoutException ste) {
+	        	ste.printStackTrace();
+	        } catch (UnknownHostException e) {
+	        	e.printStackTrace();
+	        } catch (IOException e) {
+	            System.err.println("Couldn't get I/O for the connection to the server.");
+	            e.printStackTrace();	    
+	        } catch (MessagingException e) {
+				e.printStackTrace();
+			} catch (ExtSmtpConnException e) {
+				e.printStackTrace();
+			}
+			
+            msg.releaseContent();
+        }
+        
+        private boolean isIntern(String email){
+        	ValIntAdrress val = new ValIntAdrress();
+        	return val.validate(email);
+        }
+        
+        private void checkReply(String line) throws ExtSmtpConnException{
+        	System.out.println("STAMPA:"+line);
+        	if(line == null)
+        		throw new ExtSmtpConnException();
+        	String c = line.substring(0, 1);
+        	if(!c.equals("2") && !c.equals("3") && !c.equals("5"))
+        		throw new ExtSmtpConnException();
+        	/*
+        	Pattern pattern = Pattern.compile("[2345]");
+        	Matcher matcher = pattern.matcher(line);
+        	        	
+        	if(matcher.find())
+        		return true;
+        	else 
+        		return false;
+        	*/
+        }
+    }
+}

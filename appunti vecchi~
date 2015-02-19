@@ -1,0 +1,86 @@
+Traccia progetto:
+
+Requisiti del progetto
+Lo scopo del progetto è realizzare, in un linguaggio di programmazione a scelta, un servizio di email
+scalabile ed altamente disponibile basato su Amazon Web Services (AWS). Servizi di email di utile
+riferimento per lo sviluppo del progetto sono in particolare CassMail [2] e Porcupine [3].
+Il servizio di email deve soddisfare le caratteristiche elencate di seguito.
+• Supporto dei protocolli SMTP e POP3. Opzionale: supporto del protocollo IMAP.
+• Scalabilità. Adottare a tale scopo tecniche di replicazione, eventualmente integrate con tecniche di
+caching (consigliato un grado di replicazione minimo pari a 3, in modo da poter gestire eventuali
+failure). Discutere nella relazione quale tipo di scalabilità (rispetto alla dimensione, geograﬁca) viene
+offerta dal servizio realizzato, motivando opportunamente la scelta e le soluzioni adottate.
+• Capacità elastica (ovvero scale-in e scale-out dei nodi del sistema) automatica in base al trafﬁco in
+arrivo al servizio di email. Si noti che, in base ai servizi AWS scelti, tale requisito può richiedere
+la deﬁnizione di un ciclo di controllo MAPE; una semplice sol uzione consiste nell’aumentare (o
+diminuire) il numero dei nodi sui cui il servizio è replicato quando viene superata una soglia di carico
+dei nodi che offrono il servizio (ad es., si veda la soluzione in [1]).
+• Modello di consistenza a scelta. Motivare nella relazione il modello di consistenza scelto ed il suo
+impatto sul servizio di email.
+• Gestione di failure di tipo crash dei componenti del servizio di email.
+Si progetti l’architettura del sistema che offre il servizio di email ponendo particolare cura al soddisfacimento dei requisiti sopra elencati e delle altre eventuali scelte effettuate dal gruppo e ponendo particolare
+attenzione nell’organizzazione dei dati. I componenti del sistema devono essere eseguibili nello spazio utente e senza richiedere privilegi di root. Si richiede inoltre che il servizio sia conﬁgurabile, ad es. tramite un
+ﬁle in cui sia possibile speciﬁcare i valori dei parametri di conﬁgurazione.
+Si richiede inoltre di effettuare il testing delle funzionalità del servizio realizzato e di effettuare un testing
+delle prestazioni, analizzando in particolare il throughput del servizio realizzato. A tale scopo, si può usare
+Postal (http://doc.coker.com.au/projects/postal/). I risultati del testing devono essere
+presentati e discussi nella relazione.
+
+------------------------------------------------------------------------------------------------
+
+
+Client "A" manda mail con SMTP per client "B"
+	- A quale nodo la manda? Quello più "vicino"?
+	- Se nodo non risponde? SMTP dovrebbe gestire già la situaziones
+Nodo riceve mail su porta di SMTP
+	- Duplica mail su più nodi. Cosa replico?(Organizzazione db) Dove replico?
+	- Comunicazione fra nodi tramite RMI (di base sincrono, rendere asincrono)
+	- Un nodo crasha, come mi accorgo? Attesa Ack? Timeout?
+Client "B" si connette a nodo tramite POP3 e scarica le sue mail
+	- Quale nodo? Quello più "vicino"?
+	- Consistenza? "B" si connette a nodo senza replica mail inviata da "A"
+
+Tanto traffico aumento numero nodi
+	- Chi si accorge dell'aumento del traffico?
+	- Ciclo MAPE?
+
+Organizzazione nodo
+	- Ogni nodo di quali risorse si occupa?
+	- Come faccio ad entrare ed uscire dal nodo?
+	- Come rilevo crash di un nodo e come lo dico agli altri?
+	- Ogni nodo comunica con tutti, o solo con quelli adiacenti? (se presente una struttura ad anello)
+
+Organizzazione database
+	- NOSQL?
+	- Come organizzo i dati?
+	- SimpleDB o DynamoDB?
+	- Non usare Cassandra, partire subito con db di amazon
+
+------------------------------------------------------------------------------------------------
+
+Consistenza: 
+- Consistenza finale
+- Consistenza monotonic-read
+
+Protocolli di consistenza:
+- Primary-based: scrittura su una sola replica che aggiorna poi le altre
+- Replicated-Write: scrittura su molteplici repliche
+
+Slide "Architetture" per leggere MAPE
+
+------------------------------------------------------------------------------------------------
+
+- Struttura database in base alle api di java mail (sia pop3 che imap)
+- Supporto protocolli smtp/pop3/imap
+- Organizzazione nodi
+	- Distribuzione del database
+
+--------------------------------------------------------------------------------------
+
+Da salvare in db
+
+	- Struttura mail (To, From, Oggetto, testo, allegato, cc, bcc)
+	- Utenti del sistema
+	- Mailbox Utenti
+
+--------------------------------------------------------------------------------------

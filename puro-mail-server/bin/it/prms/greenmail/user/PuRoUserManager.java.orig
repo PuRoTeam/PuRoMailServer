@@ -1,0 +1,355 @@
+package it.prms.greenmail.user;
+
+import it.prms.amazon.DynamoDB;
+import it.prms.amazon.TableInfo;
+import it.prms.amazon.UserResult;
+import it.prms.amazon.WrongTypeException;
+import it.prms.greenmail.PuRoConfig;
+import it.prms.greenmail.imap.PuRoImapHostManager;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+
+import com.amazonaws.AmazonClientException;
+import com.amazonaws.AmazonServiceException;
+import com.amazonaws.services.dynamodb.model.AttributeValue;
+import com.amazonaws.services.dynamodb.model.ConditionalCheckFailedException;
+import com.amazonaws.services.dynamodb.model.InternalServerErrorException;
+import com.amazonaws.services.dynamodb.model.ProvisionedThroughputExceededException;
+import com.amazonaws.services.dynamodb.model.ResourceNotFoundException;
+
+public class PuRoUserManager{
+
+	private PuRoImapHostManager imapHostManager;
+	private PuRoConfig config;
+	private DynamoDB dynamoDB;
+	Map<String, PuRoMailUser> usersMap = Collections.synchronizedMap(new HashMap<String, PuRoMailUser>());
+	
+	public PuRoUserManager(PuRoImapHostManager imapHostManager, PuRoConfig config, DynamoDB dynamoDB)
+	{
+		this.imapHostManager = imapHostManager;
+		this.config = config;
+		this.dynamoDB = dynamoDB;
+	}
+	
+	public PuRoMailUser getUser(String login)
+	{    	
+    	String email = getEmailFromLoginString(login);
+    	
+		PuRoMailUser updatedUser = null;
+    	
+    	boolean isUpdated = userIsUpdated(email);
+    	
+		if(!isUpdated)
+		{
+			updatedUser = getUserFromDB(email);
+			
+			if(updatedUser != null)
+			{
+				usersMap.put(email, updatedUser);
+				//TODO da mettere tutto su db?
+				//imapHostManager.getStore().addInMemoryFolderToRoot(updatedUser.getQualifiedMailboxName());
+			}
+		}
+		else
+			updatedUser = usersMap.get(email);
+				
+		return updatedUser;
+	}
+	
+	private String getEmailFromLoginString(String login)
+	{
+    	int index = login.indexOf("@");
+    	
+    	String email = "";
+    	
+    	if(index == -1)
+    		email = login + "@" + config.getDomainName();
+    	else
+    		email = login;
+    	
+    	return email;
+	}
+	
+	private boolean userIsUpdated(String email)
+	{
+		PuRoMailUser inMemUser = usersMap.get(email);
+		
+		boolean isUpdated = false; 
+		
+		if(inMemUser != null)
+		{
+			String attributeToGet[] = {TableInfo.TUserLastUpdate.toString()};
+			Map<String, AttributeValue> userItem = getUserAttributesFromDB(email, attributeToGet);
+			
+			AttributeValue lastUpdateDB = userItem.get(TableInfo.TUserLastUpdate.toString());
+			
+			if(lastUpdateDB != null) //utente in db, confrontare data in memoria con data in db
+			{
+				try
+				{
+					long lLastUpdateDB = Long.valueOf(lastUpdateDB.getN());
+					Date dateLastUpdateDB = new Date(lLastUpdateDB);
+					
+					if(inMemUser.getLastUpdate().compareTo(dateLastUpdateDB) >= 0)
+						isUpdated = true;
+				}
+				catch(NumberFormatException e)
+				{ e.printStackTrace(); }
+			}
+		} 
+		
+		return isUpdated;
+	}
+		
+	private PuRoMailUser getUserFromDB(String email)
+	{    	
+    	PuRoMailUser user = null;
+    	
+    	String attributesToGet[] = new String[0];
+    	Map<String, AttributeValue> userItem = getUserAttributesFromDB(email, attributesToGet);
+    	
+    	if(userItem != null)
+    	{
+    		UserResult userResult = new UserResult(userItem);
+    		user = new PuRoMailUser(userResult, imapHostManager);
+    	}
+    	
+    	return user;
+	}
+	
+	private Map<String, AttributeValue> getUserAttributesFromDB(String email, String attributesToGet[])
+	{
+		Map<String, AttributeValue> userItem = null;
+		
+		try
+		{
+			if(attributesToGet.length > 0)
+				userItem = dynamoDB.retrieveUserItem(email, attributesToGet);
+			else
+				userItem = dynamoDB.retrieveUserItem(email);
+		}
+    	catch (ProvisionedThroughputExceededException e) 
+    	{ e.printStackTrace(); } 
+    	catch (InternalServerErrorException e) 
+    	{ e.printStackTrace(); } 
+    	catch (ResourceNotFoundException e) 
+    	{ e.printStackTrace(); } 
+    	catch (AmazonServiceException e) 
+    	{ e.printStackTrace(); } 
+    	catch (AmazonClientException e) 
+    	{ e.printStackTrace(); } 
+    	catch (WrongTypeException e) 
+    	{ e.printStackTrace(); }
+		
+		return userItem;
+	}
+	
+	/**
+	 * Metodo che controlla se l'utente è già autenticato con il sistema
+	 * @param login
+	 * @param password
+	 * @return l'utente autenticato
+	 */
+    public PuRoMailUser test(String login, String password) 
+    {
+    	String email = getEmailFromLoginString(login);
+    	
+    	PuRoMailUser authenticatedUser = null;    	
+    	boolean isUpdated = userIsUpdated(email); //legge solo il campo "lastUpdate"
+    	
+    	if(isUpdated)
+    	{
+    		System.out.println("Updated!");
+    		PuRoMailUser inMemUser = usersMap.get(email);
+    		
+    		if(inMemUser.getPassword().equals(password))
+    			authenticatedUser = inMemUser;
+    	}
+    	else
+    	{
+    		System.out.println("Old!");
+    		String attributeToGet[] = {TableInfo.TUserPassword.toString()};
+    		Map<String, AttributeValue> item = getUserAttributesFromDB(email, attributeToGet);
+    		
+    		if(item != null)
+    		{
+    			AttributeValue attrPassword = item.get(TableInfo.TUserPassword.toString());
+    			
+    			if(attrPassword != null)
+    			{
+    				String dbPassword = attrPassword.getS();
+    				
+    				if(dbPassword.equals(password))
+    				{
+    					//email e password posso non leggerli da db, perchè ce li ho già
+        				String otherAttributeToGet[] = {TableInfo.TUserFirstName.toString(), TableInfo.TUserLastName.toString(), TableInfo.TUserFolder.toString(), TableInfo.TUserLastUpdate.toString()};
+        				
+        				Map<String, AttributeValue> otherItem = getUserAttributesFromDB(email, otherAttributeToGet);	
+        				
+        				UserResult result = new UserResult(otherItem);	    				
+        				result.setEmail(email);
+        				result.setPassword(dbPassword);
+        				
+        				authenticatedUser = new PuRoMailUser(result, imapHostManager);
+        				
+        				usersMap.put(email, authenticatedUser);
+        				//TODO da mettere tutto su db?
+        				//imapHostManager.getStore().addInMemoryFolderToRoot(authenticatedUser.getQualifiedMailboxName()); 
+    				}
+    			}
+    		}
+    	}
+	    	
+    	return authenticatedUser;
+    }
+	
+    public synchronized void addConnectedUser(PuRoMailUser user) 
+    {
+    	if(user != null)
+    		user.addConnectedUser();
+    }
+    
+    public synchronized void removeConnectedUser(PuRoMailUser user)
+    {
+    	if(user != null)
+    	{
+    		user.removeConnectedUser();
+    	
+    		if(user.getConnectedUser() == 0)
+    			usersMap.remove(user.getEmail());
+    	}
+    }        
+    
+	/*
+    public PuRoMailUser getUser(String login) 
+    {    	
+    	int index = login.indexOf("@");
+    	
+    	String email = "";
+    	
+    	if(index == -1)
+    		email = login + "@" + config.getDomainName();
+    	else
+    		email = login;    	
+    	
+    	PuRoMailUser user = null;
+
+    	try 
+    	{
+    		Map<String, AttributeValue> userItem = dynamoDB.retrieveUserItem(email);
+    		
+    		if(userItem != null)
+    		{	    		
+    			user = new PuRoMailUser(imapHostManager);
+	    		UserResult userResult = new UserResult(userItem);
+	        		
+	    	    user.setEmail(userResult.getEmail());
+	    	    user.setPassword(userResult.getPassword());
+	    		user.setFirstname(userResult.getFirstname());
+	    		user.setLastname(userResult.getLastname());    		
+	    		
+	    		ArrayList<String> userFolder = user.getFolder();
+	    		ArrayList<String> userResultFolder = userResult.getFolder();
+	    		
+	    		for(int i = 0; i < userResultFolder.size(); i++)
+	    			userFolder.add(userResultFolder.get(i));
+	    		
+	    		//ArrayList<Region> userRegion = user.getRegion();
+	    		//ArrayList<String> userResultRegion = userResult.getRegion();
+	    		//
+	    		//for(int i = 0; i < userResultRegion.size(); i++)
+	    		//{
+	    		//	Region region = Region.valueOf(userResultRegion.get(i));
+	    		//	userRegion.add(region);
+	    		//}
+	    		
+	    		imapHostManager.getStore().addInMemoryFolderToRoot(user.getQualifiedMailboxName());
+    		}
+		} //non c'è bisogno di rimuovere la cartella dalla memoria se c'è un errore, perchè l'errore si è verificato in retrieveUserItem, ossia prima di creare la cartella in memoria
+    	catch (ProvisionedThroughputExceededException e) {
+			e.printStackTrace();
+		} 
+    	catch (InternalServerErrorException e) {
+			e.printStackTrace();
+		} 
+    	catch (ResourceNotFoundException e) {
+			e.printStackTrace();
+		} 
+    	catch (AmazonServiceException e) {
+			e.printStackTrace();
+		} 
+    	catch (AmazonClientException e) {
+			e.printStackTrace();
+		} 
+    	catch (WrongTypeException e) {
+			e.printStackTrace();
+		}
+    	
+    	return user;
+    }*/
+    
+    public void createUserInDb(String email, String password, String firstname, String lastname) throws UserException 
+    {  
+    	Date creationDate = new Date();
+    	PuRoMailUser newUser = new PuRoMailUser(email, password, firstname, lastname, creationDate, imapHostManager);    	
+    	ArrayList<String> userFolder = newUser.getFolder();
+    	
+    	String inbox = PuRoImapHostManager.USER_NAMESPACE + PuRoImapHostManager.HIERARCHY_DELIMITER +  newUser.getQualifiedMailboxName() + PuRoImapHostManager.HIERARCHY_DELIMITER + PuRoImapHostManager.INBOX_NAME;
+    	userFolder.add(inbox);    	
+    	
+    	try
+    	{
+    		dynamoDB.createAndAddUserItems(newUser);
+    	}
+    	catch(ProvisionedThroughputExceededException e)
+    	{ 
+    		e.printStackTrace();
+    		throw new UserException(); 
+    	}
+    	catch(ConditionalCheckFailedException e)
+    	{ 
+    		e.printStackTrace();
+    		throw new UserException(); 
+    	}
+    	catch(InternalServerErrorException e)
+    	{ 
+    		e.printStackTrace();
+    		throw new UserException(); 
+    	}
+    	catch(ResourceNotFoundException e)
+    	{ 
+    		e.printStackTrace();
+    		throw new UserException(); 
+    	}
+    	catch(AmazonServiceException e)
+    	{ 
+    		e.printStackTrace();
+    		throw new UserException(); 
+    	}
+    	catch(AmazonClientException e)
+    	{ 
+    		e.printStackTrace();
+    		throw new UserException(); 
+    	}
+    }
+
+    public void deleteUser(PuRoMailUser user){
+
+    }
+
+    public PuRoImapHostManager getImapHostManager() {
+        return imapHostManager;
+    }
+	
+    public DynamoDB getDynamoDB() {
+        return dynamoDB;
+    }
+    
+    public PuRoConfig getConfig() {
+    	return config;
+    }
+}

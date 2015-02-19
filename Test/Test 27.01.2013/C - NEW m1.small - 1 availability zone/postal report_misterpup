@@ -1,0 +1,99 @@
+misterpup@PupAtWork:~/Scaricati/postal-0.72$ ./postal [puro-mail.tk]12365 -t 20 -c 3 /home/misterpup/Scrivania/Uni/SD/Progetto/Testing/postal_SMTP/user_list.txt
+time,messages,data(K),errors,connections,SSL connections
+19:37,8,143,0,24,0
+19:38,238,1317,0,120,0
+19:39,249,1419,0,120,0
+19:40,227,1127,0,117,0
+19:41,199,1063,0,98,0
+19:42,94,507,0,53,0
+19:43,77,485,1,36,0
+19:44,82,453,0,44,0
+19:45,87,471,0,43,0
+19:46,53,290,0,30,0
+19:47,47,239,0,22,0
+19:48,57,290,0,32,0
+Cmisterpup@PupAtWork:~/Scaricati/postal-0.72$ ./postal [puro-mail.tk]12365 -t 60 -c 3 /home/misterpup/Scrivania/Uni/SD/Progetto/Testing/postal_SMTP/user_list.txt
+time,messages,data(K),errors,connections,SSL connections
+19:49,7,381,0,62,0
+19:50,145,738,0,60,0
+19:51,153,844,0,71,0
+Cmisterpup@PupAtWork:~/Scaricati/postal-0.72$ ./postal [puro-mail.tk]12365 -t 100 -c 3 /home/misterpup/Scrivania/Uni/SD/Progetto/Testing/postal_SMTP/user_list.txt
+time,messages,data(K),errors,connections,SSL connections
+19:52,1,476,0,100,0
+19:53,124,894,21,66,0
+19:54,105,547,4,43,0
+19:55,127,773,23,92,0
+19:56,148,949,30,89,0
+19:57,129,874,35,84,0
+19:58,160,1057,35,107,0
+19:59,135,827,35,88,0
+misterpup@PupAtWork:~/Scaricati/postal-0.72$ ./postal [puro-mail.tk]12365 -t 400 -c 3 /home/misterpup/Scrivania/Uni/SD/Progetto/Testing/postal_SMTP/user_list.txt
+time,messages,data(K),errors,connections,SSL connections
+20:04,140,2804,156,451,0
+20:05,568,3483,131,308,0
+20:06,400,3241,155,360,0
+20:07,399,2972,180,332,0
+20:08,420,3108,127,302,0
+20:09,538,3731,199,420,0
+20:10,687,4410,177,439,0
+20:11,532,3876,158,404,0
+20:12,639,4246,198,457,0
+20:13,627,4418,171,457,0
+misterpup@PupAtWork:~/Scaricati/postal-0.72$ ./postal [puro-mail.tk]12365 -t 300 -c 3 /home/misterpup/Scrivania/Uni/SD/Progetto/Testing/postal_SMTP/user_list.txt
+time,messages,data(K),errors,connections,SSL connections
+20:14,238,2728,4,410,0
+20:15,590,3938,159,409,0
+20:16,398,3016,140,333,0
+20:17,503,3345,119,340,0
+misterpup@PupAtWork:~/Scaricati/postal-0.72$ ./postal [puro-mail.tk]12365 -t 200 -c 3 /home/misterpup/Scrivania/Uni/SD/Progetto/Testing/postal_SMTP/user_list.txt
+time,messages,data(K),errors,connections,SSL connections
+20:20,152,1938,0,272,0
+20:21,221,1738,122,211,0
+20:22,336,2159,75,221,0
+20:23,364,2206,68,240,0
+20:24,430,2574,68,266,0
+misterpup@PupAtWork:~/Scaricati/postal-0.72$ ./postal [puro-mail.tk]12365 -t 100 -c 3 /home/misterpup/Scrivania/Uni/SD/Progetto/Testing/postal_SMTP/user_list.txt
+time,messages,data(K),errors,connections,SSL connections
+20:25,58,854,0,127,0
+20:26,249,1473,31,150,0
+20:27,251,1475,30,140,0
+20:28,186,1147,28,126,0
+Cmisterpup@PupAtWork:~/Scaricati/postal-0.72$ ./postal [puro-mail.tk]12365 -t 50 -c 3 /home/misterpup/Scrivania/Uni/SD/Progetto/Testing/postal_SMTP/user_list.txt
+time,messages,data(K),errors,connections,SSL connections
+20:29,40,494,0,71,0
+20:30,128,752,20,77,0
+20:31,129,764,24,75,0
+20:32,107,699,22,72,0
+20:33,97,691,17,68,0
+misterpup@PupAtWork:~/Scaricati/postal-0.72$ ./postal [puro-mail.tk]12365 -t 10 -c 3 /home/misterpup/Scrivania/Uni/SD/Progetto/Testing/postal_SMTP/user_list.txt
+time,messages,data(K),errors,connections,SSL connections
+20:34,0,54,0,10,0
+20:35,28,191,4,17,0
+Cmisterpup@PupAtWork:~/Scaricati/postal-0.72$ ./postal [puro-mail.tk]12365 -c 3 /home/misterpup/Scrivania/Uni/SD/Progetto/Testing/postal_SMTP/user_list.txt
+time,messages,data(K),errors,connections,SSL connections
+20:37,1,18,0,2,0
+20:38,8,33,1,4,0
+20:39,8,56,0,4,0
+20:40,7,32,0,4,0
+20:41,5,41,1,4,0
+20:42,5,25,0,4,0
+20:43,0,5,0,0,0
+20:44,7,49,1,4,0
+20:45,10,56,0,4,0
+20:46,98,464,0,51,0
+20:47,101,563,0,47,0
+20:48,105,526,0,51,0
+20:49,104,553,0,51,0
+20:50,93,518,0,50,0
+20:51,100,535,0,51,0
+20:52,103,557,0,53,0
+20:53,103,519,0,51,0
+20:54,87,463,2,39,0
+20:55,83,422,0,49,0
+20:56,83,455,1,39,0
+20:57,97,499,0,47,0
+20:58,105,574,0,51,0
+20:59,93,539,0,50,0
+21:00,91,523,0,42,0
+
+

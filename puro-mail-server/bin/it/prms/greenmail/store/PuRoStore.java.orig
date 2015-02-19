@@ -1,0 +1,478 @@
+package it.prms.greenmail.store;
+
+import it.prms.amazon.DynamoDB;
+import it.prms.amazon.FolderResult;
+import it.prms.amazon.S3;
+import it.prms.amazon.TableInfo;
+import it.prms.amazon.WrongTypeException;
+import it.prms.greenmail.imap.ImapConstants;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.Map;
+import java.util.StringTokenizer;
+
+import javax.mail.Flags;
+
+import com.amazonaws.AmazonClientException;
+import com.amazonaws.AmazonServiceException;
+import com.amazonaws.services.dynamodb.model.AttributeValue;
+import com.amazonaws.services.dynamodb.model.InternalServerErrorException;
+import com.amazonaws.services.dynamodb.model.ProvisionedThroughputExceededException;
+import com.amazonaws.services.dynamodb.model.ResourceNotFoundException;
+
+//TODO implementa STORE??
+public class PuRoStore implements /*Store,*/ ImapConstants { 
+
+    private PuRoRootFolder rootMailbox; //(*) un oggetto PuRoRootFolder con nome "#mail" e senza genitore (lo teniamo solo in memoria e non su DynamoDB)
+    private DynamoDB dynamoDB;
+    private S3 s3;
+    
+    private static final Flags PERMANENT_FLAGS = new Flags();
+    
+    static {
+        PERMANENT_FLAGS.add(Flags.Flag.ANSWERED);
+        PERMANENT_FLAGS.add(Flags.Flag.DELETED);
+        PERMANENT_FLAGS.add(Flags.Flag.DRAFT);
+        PERMANENT_FLAGS.add(Flags.Flag.FLAGGED);
+        PERMANENT_FLAGS.add(Flags.Flag.SEEN);
+    }
+
+    public PuRoStore(DynamoDB dynamoDB, S3 s3)
+    {
+    	rootMailbox = new PuRoRootFolder(dynamoDB, s3);
+    	this.dynamoDB = dynamoDB;
+    	this.s3 = s3;
+    }
+    
+    /*public synchronized void addFolderViewer(String absoluteMailboxName) {
+    	PuRoHierarchicalFolder folder = getFolderOnly(absoluteMailboxName);
+    	if(folder != null)
+    		folder.addViewer();
+    }
+    
+    public synchronized void removeFolderViewer(String absoluteMailboxName) {
+    	PuRoHierarchicalFolder folder = getFolderOnly(absoluteMailboxName);
+    	if(folder != null && folder.removeViewer() == 0)
+    		folder.getParent().deleteChild(folder.getName());
+    }*/
+    
+    //aumenta il numero di viewer per la cartella folder e tutti i suoi parenti (esclusa la root #mail)
+    public synchronized void addFolderAndParentViewer(PuRoHierarchicalFolder folder) {
+    	PuRoHierarchicalFolder parent = folder;
+    	
+    	while(parent != null && parent != rootMailbox)
+    	{
+    		parent.addViewer();
+    		parent = parent.getParent();
+    	} 	
+    }
+     
+    //decrementa il numero di viewer per folder e tutti i suoi parenti (esclusa la root #mail)
+    public synchronized void removeFolderAndParentViewer(PuRoHierarchicalFolder folder) {
+    	PuRoHierarchicalFolder parent = folder;
+    	
+    	while(parent != null && parent != rootMailbox)
+    	{
+    		int curViewer = parent.removeViewer();
+    		String toRemove = parent.getName();
+    		parent = parent.getParent();
+    		
+    		if(curViewer == 0)
+    			parent.deleteChild(toRemove);
+    	}
+    }
+    
+   /* public synchronized void addFolderViewer(PuRoHierarchicalFolder folder){
+    	if(folder != null)
+    		folder.addViewer();
+    }
+    
+    public synchronized void removeFolderViewer(PuRoHierarchicalFolder folder){
+    	if(folder != null && folder.removeViewer() == 0)
+    		folder.getParent().deleteChild(folder.getName());
+    }*/
+    
+    public PuRoHierarchicalFolder getFolderOnly(String absoluteMailboxName){
+    	StringTokenizer tokens = new StringTokenizer(absoluteMailboxName, HIERARCHY_DELIMITER); //(*) delimitatore token: "."
+
+        // The first token must be "#mail"
+        //(*) quindi qua si prende già il primo token "#mail"
+        if (!tokens.hasMoreTokens() || !tokens.nextToken().equalsIgnoreCase(USER_NAMESPACE)) {
+            return null;
+        }
+
+        PuRoHierarchicalFolder parent = rootMailbox;
+        while (parent != null && tokens.hasMoreTokens()) {
+            String childName = tokens.nextToken(); //(*) token corrente: "<HASH-EMAIL>"
+            parent = parent.getChild(childName); //(*) restituisce oggetto HierarchicalFolder dal nome childName = "INBOX" (per SMTP e POP3)
+        }
+        
+        return parent;
+    }
+    
+    public PuRoHierarchicalFolder getPop3Inbox(String qualifiedMailboxName) throws FolderException
+    {    	
+    	int index = qualifiedMailboxName.lastIndexOf(".");
+    	
+    	if(index == -1)
+    		return null;
+    	
+    	String parentPath = qualifiedMailboxName.substring(0, index);    	
+    	PuRoHierarchicalFolder parent = rootMailbox;
+    	
+    	StringTokenizer tokens = new StringTokenizer(parentPath, HIERARCHY_DELIMITER); //(*) delimitatore token: "."
+    	    	
+        if (!tokens.hasMoreTokens() || !tokens.nextToken().equalsIgnoreCase(USER_NAMESPACE))        
+            return null;
+    	
+    	while (parent != null && tokens.hasMoreTokens())
+    	{
+    		String childName = tokens.nextToken();
+    		parent = parent.getChild(childName);
+    	} 	
+    	
+    	if(parent == null)
+    		return null;
+    	
+		PuRoHierarchicalFolder inbox = null;
+		
+		Map<String, AttributeValue> folderItem;
+		try 
+		{			
+			folderItem = dynamoDB.retrieveFolderItem(qualifiedMailboxName);
+		
+			if(folderItem != null) //la cartella esisteva in DynamoDB
+			{
+				FolderResult folderResult = new FolderResult(folderItem); //oggetto con dentro i campi della relativa riga in DynamoDB
+				
+				//TODO attenzione nomi campi tabella Folder in DynamoDB
+				inbox = new PuRoHierarchicalFolder(parent, folderResult.getName(), folderResult.getNextUID(), folderResult.isSelectable(), dynamoDB, s3); 
+				parent.getChildren().add(inbox);
+			}
+		
+		} 
+		catch (ProvisionedThroughputExceededException e) 
+		{ e.printStackTrace(); } 
+		catch (InternalServerErrorException e) 
+		{ e.printStackTrace(); } 
+		catch (ResourceNotFoundException e) 
+		{ e.printStackTrace(); } 
+		catch (AmazonServiceException e) 
+		{ e.printStackTrace(); } 
+		catch (AmazonClientException e) 
+		{ e.printStackTrace(); } 
+		catch (WrongTypeException e) 
+		{ e.printStackTrace(); }
+		
+		
+		return inbox;
+    }
+    
+    /**
+     * Aggiunge solo in memoria cartelle del tipo #mail.hash-mail
+     * @param inMemoryFolderName, è il nome finale, non il path assoluto
+     * @return un oggetto tipo PuroHierarchicalFolder
+     */
+    public PuRoHierarchicalFolder addInMemoryFolderToRoot(String inMemoryFolderName)
+    {    	
+    	ArrayList<PuRoHierarchicalFolder> rootChildren = rootMailbox.getChildren();
+    	
+    	for(int i = 0; i < rootChildren.size(); i++)
+    	{
+    		PuRoHierarchicalFolder curChild = rootChildren.get(i);
+    		if(curChild.getName().equals(inMemoryFolderName))
+    			return curChild;
+    	}
+    	//figlio non già esistente
+    	PuRoHierarchicalFolder newFolder = new PuRoHierarchicalFolder(rootMailbox, inMemoryFolderName, dynamoDB, s3/*, Long.MAX_VALUE*/); 	
+    	rootChildren.add(newFolder);
+    	
+    	return newFolder;
+    }
+    
+    /**
+     * ok
+     * TODO resettare timer
+     *  
+     * @param qualifiedMailboxName
+     * @return
+     * @throws ProvisionedThroughputExceededException
+     * @throws InternalServerErrorException
+     * @throws ResourceNotFoundException
+     * @throws AmazonServiceException
+     * @throws AmazonClientException
+     * @throws WrongTypeException
+     */
+	public PuRoHierarchicalFolder getMailbox(String qualifiedMailboxName) throws ProvisionedThroughputExceededException, InternalServerErrorException, ResourceNotFoundException, AmazonServiceException, AmazonClientException, WrongTypeException
+	{			
+        StringTokenizer tokens = new StringTokenizer(qualifiedMailboxName, HIERARCHY_DELIMITER); //(*) delimitatore token: "."
+
+        //consuma il primo token, "#mail"
+        if (!tokens.hasMoreTokens() || !tokens.nextToken().equalsIgnoreCase(USER_NAMESPACE))        
+            return null;
+        
+        PuRoHierarchicalFolder lastParent = null;
+        PuRoHierarchicalFolder updatedFolder = rootMailbox;        
+        
+        boolean isUpdated = true; //se false devo aggiornare la folder dalla memoria     
+        String nameToUpdate = ""; //nome prima cartella da aggiornare
+        
+        while (tokens.hasMoreTokens()) 
+        {       	
+        	lastParent = updatedFolder;        		
+        	String childName = tokens.nextToken();
+        	updatedFolder = updatedFolder.getChild(childName); //(*) restituisce oggetto HierarchicalFolder dal nome childName = "INBOX" (per SMTP e POP3)         
+            
+        	if(updatedFolder == null || !folderIsUpdated(updatedFolder.getFullName())/*!updatedFolder.isUpdated()*/) //visto che è un OR, se parent è nullo non viene valutata la seconda condizione e quindi nessun "segmentation fault"
+        	{
+        		isUpdated = false;
+        		nameToUpdate = childName;
+        		break;
+        	}            
+        }
+        
+        if(!isUpdated) //cartella da aggiornare (o perchè non esiste in memoria o perchè scaduta
+        {
+        	try 
+        	{
+        		String pathToFolderToUpdate = lastParent.getFullName() + HIERARCHY_DELIMITER + nameToUpdate;
+        		
+        		updatedFolder = updateFolder(lastParent, pathToFolderToUpdate);      		
+        		
+        		while(updatedFolder != null && tokens.hasMoreTokens()) //se volevo la cartella #mail.hash.A.B e già la A non era aggiornata, ora che ho caricato A, devo caricare anche B
+        		{
+        			lastParent = updatedFolder;
+        			String childName = tokens.nextToken();
+        			pathToFolderToUpdate += HIERARCHY_DELIMITER + childName;
+        			updatedFolder = updateFolder(lastParent, pathToFolderToUpdate);
+        		}
+			}
+        	catch(Exception e) //TODO catturare diversamente le singole eccezioni?
+        	{
+        		return null;
+        	}        	
+        }
+        
+        return updatedFolder;    
+	}
+	
+	
+	//aggiorna la cartella col path "folderToUpdateCompletePath" in memoria, e la aggiunge fra i figli di "parent"
+	//ok
+	//TODO devo aggiornare la cartella già esistente, se esistente e non creare un oggetto nuovo
+	public PuRoHierarchicalFolder updateFolder(PuRoHierarchicalFolder parent, String folderToUpdateCompletePath) throws ProvisionedThroughputExceededException, InternalServerErrorException, ResourceNotFoundException, AmazonServiceException, AmazonClientException, WrongTypeException
+	{
+		PuRoHierarchicalFolder updatedFolder = null;
+		
+		Map<String, AttributeValue> folderItem = dynamoDB.retrieveFolderItem(folderToUpdateCompletePath);
+		
+		if(folderItem != null) //la cartella esisteva in DynamoDB
+		{
+			FolderResult folderResult = new FolderResult(folderItem); //oggetto con dentro i campi della relativa riga in DynamoDB
+			
+			//TODO attenzione nomi campi tabella Folder in DynamoDB
+			updatedFolder = new PuRoHierarchicalFolder(parent, folderResult.getName(), folderResult.getNextUID(), folderResult.isSelectable(), dynamoDB, s3/*, dynamoDB.getTimer()*/); 
+			parent.getChildren().add(updatedFolder);
+		}
+		
+		return updatedFolder;
+	}
+	
+	
+	/**
+	 * Controlla se la cartella in memoria è aggiornata rispetto al quella salvata in dynamo
+	 * @param folderCompletePath
+	 * @return true se aggiornata, false altrimenti
+	 * @throws ProvisionedThroughputExceededException
+	 * @throws InternalServerErrorException
+	 * @throws ResourceNotFoundException
+	 * @throws AmazonServiceException
+	 * @throws AmazonClientException
+	 * @throws WrongTypeException
+	 */
+	public boolean folderIsUpdated(String folderCompletePath) throws ProvisionedThroughputExceededException, InternalServerErrorException, ResourceNotFoundException, AmazonServiceException, AmazonClientException, WrongTypeException
+	{
+		boolean isUpdated = false;
+		PuRoHierarchicalFolder inMemFolder = getMailbox(folderCompletePath);
+		
+		//Se la cartella è presente nell'albero in memoria
+		if(inMemFolder != null){
+			
+			//Recupero il campo "lastUpdate" dalla tabella su Dynamo
+			String attributeToGet[] = {TableInfo.TFolderLastUpdate.toString()};
+			Map<String, AttributeValue> folderItem = getFolderAttributesFromDB(folderCompletePath, attributeToGet);
+			AttributeValue lastUpdateFolder = folderItem.get(TableInfo.TFolderLastUpdate.toString());
+			
+			//Se il campo "lastUpdate" è valorizzato
+			if(lastUpdateFolder != null){
+				try{
+					long lastUpdate = Long.valueOf(lastUpdateFolder.getN());
+					Date dateLastUpdate = new Date(lastUpdate);
+					
+					//Se il valore in memoria è >= di quello recuperato dal DB allora la cartella è aggiornata
+					if(inMemFolder.getLastUpdate().compareTo(dateLastUpdate) >= 0)
+						isUpdated = true;
+				
+				}catch(NumberFormatException e){
+					e.printStackTrace();
+				}
+			}
+		}
+		
+		return isUpdated;
+	}
+	
+	/**
+	 * Recupera dalla tabella "Folder" in DynamoDB gli attributi specificati per una data entry 
+	 * @param folder, entry che si vuole recuperare
+	 * @param attributesToGet, colonne della entry specificata
+	 * @return HashMap con il risultato
+	 */
+	private Map<String, AttributeValue> getFolderAttributesFromDB(String folder, String attributesToGet[])
+	{
+		Map<String, AttributeValue> folderItem = null;
+		
+		try
+		{
+			if(attributesToGet.length > 0)
+				folderItem = dynamoDB.retrieveFolderItem(folder, attributesToGet);
+			else
+				folderItem = dynamoDB.retrieveFolderItem(folder);
+		}
+    	catch (ProvisionedThroughputExceededException e) 
+    	{ e.printStackTrace(); } 
+    	catch (InternalServerErrorException e) 
+    	{ e.printStackTrace(); } 
+    	catch (ResourceNotFoundException e) 
+    	{ e.printStackTrace(); } 
+    	catch (AmazonServiceException e) 
+    	{ e.printStackTrace(); } 
+    	catch (AmazonClientException e) 
+    	{ e.printStackTrace(); } 
+    	catch (WrongTypeException e) 
+    	{ e.printStackTrace(); }
+		
+		return folderItem;
+	}
+	
+	
+	/**
+	 * Aggiorna i campi della cartella in memoria con le informazioni recuparate da Dynamo
+	 * @param folder cartella da aggiornare
+	 * @return f aggiornata, o null se c'è stato qualche errore
+	 * @throws WrongTypeException 
+	 * @throws AmazonClientException 
+	 * @throws AmazonServiceException 
+	 * @throws ResourceNotFoundException 
+	 * @throws InternalServerErrorException 
+	 * @throws ProvisionedThroughputExceededException 
+	 */
+	public PuRoHierarchicalFolder upgradePuRoFolder(PuRoHierarchicalFolder folder) throws ProvisionedThroughputExceededException, InternalServerErrorException, ResourceNotFoundException, AmazonServiceException, AmazonClientException, WrongTypeException{
+		
+		Map<String, AttributeValue> item = getFolderAttributesFromDB(folder.getFullName(), null);
+		FolderResult folderResult = new FolderResult(item);
+		
+		if(folderResult != null){
+			//TODO probabilmente non va fatto
+			//folder.setName(folderResult.getName()); 					
+			folder.setNextUid(folderResult.getNextUID());
+			//TODO gestire bene, attenzione!!!
+			//folder.getParent();
+			//for(int i=0; i<folder.getChildren().size(); ++i)
+				//folder.getChildren().get(i).setName(folderResult.getChildren().get(i));
+			
+			folder.setSelectable(folderResult.isSelectable());
+			folder.setLastUpdate(folderResult.getLastUpdate());
+		}
+		
+		return folder;
+	}
+	
+	public PuRoHierarchicalFolder getMailbox(MailFolder parent, String mailboxName) {
+		return ((PuRoHierarchicalFolder) parent).getChild(mailboxName);
+	}
+
+	
+	public Collection getChildren(MailFolder parent) {
+		// TODO Auto-generated method stub
+		return null;
+	}
+	
+	/**
+	 * salva su dynamoDB nella tabella Folder un item rappresentante la folder la cui chiave è il percorso completo fullNewMailboxName
+	 * ok
+	 * 
+	 * @param parent
+	 * @param mailboxName
+	 * @param selectable
+	 * @return
+	 * @throws FolderException
+	 */
+	public PuRoHierarchicalFolder createMailbox(PuRoHierarchicalFolder parent, String mailboxName, boolean selectable) throws FolderException
+	{		
+        if (mailboxName.indexOf(HIERARCHY_DELIMITER_CHAR) != -1) //il nome della mailbox non può essere composto da "."
+        	throw new FolderException("Invalid mailbox name.");
+               	
+        	String fullNewMailboxName = parent.getFullName() + HIERARCHY_DELIMITER_CHAR + mailboxName;
+      
+			Map<String, AttributeValue> folderItem;
+			try 
+			{
+				folderItem = dynamoDB.retrieveFolderItem(fullNewMailboxName, new String[0]);
+				
+		        if(folderItem != null) //folder già esistente		        
+		        {	
+		        	throw new FolderException("Mailbox already exists.");
+		        }
+		        else
+		        {
+		        	PuRoHierarchicalFolder castParent = (PuRoHierarchicalFolder) parent;
+		        	PuRoHierarchicalFolder child = new PuRoHierarchicalFolder(castParent, mailboxName, dynamoDB, s3); 
+		            child.setSelectable(selectable);
+		         		           
+		           dynamoDB.createAndAddFolderItem(child);
+		            		            
+		            castParent.getChildren().add(child); // in questa posizione perchè così se si verifica un'eccezione non viene aggiunto child fra i figli di parent
+		            
+		            return child;
+		        }
+			} 
+			catch (AmazonClientException e) 
+			{ throw new FolderException("Server error."); }
+			catch (WrongTypeException e)
+			{ throw new FolderException("Server error."); }
+	}
+
+	
+	public MailFolder setSelectable(MailFolder folder, boolean selectable) {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	
+	public void deleteMailbox(MailFolder folder) throws FolderException {
+		// TODO Auto-generated method stub
+		
+	}
+
+	
+	public void renameMailbox(MailFolder existingFolder, String newName)
+			throws FolderException {
+		// TODO Auto-generated method stub
+		
+	}
+
+	
+	public Collection listMailboxes(String searchPattern)
+			throws FolderException {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+    public PuRoRootFolder getRootFolder(){
+    	return rootMailbox;
+    }
+
+}

@@ -1,0 +1,5 @@
+m1.small
+1 availability zone
+cooldown policy: 180
+period metrics: 60
+evaluation periods metrics: 3

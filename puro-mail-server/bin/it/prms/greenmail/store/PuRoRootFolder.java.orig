@@ -1,0 +1,18 @@
+package it.prms.greenmail.store;
+
+import it.prms.amazon.DynamoDB;
+import it.prms.amazon.S3;
+import it.prms.greenmail.imap.ImapConstants;
+
+public class PuRoRootFolder extends PuRoHierarchicalFolder 
+{
+    public PuRoRootFolder(DynamoDB dynamoDB, S3 s3, long timerInMillisec) 
+    {
+        super(null, ImapConstants.USER_NAMESPACE, dynamoDB, s3/*, timerInMillisec*/);
+    }
+
+    public String getFullName() 
+    {
+        return getName();
+    }
+}

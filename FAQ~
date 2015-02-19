@@ -1,0 +1,9 @@
+- Pagina registrazione Utente
+- Load Balancer su istanze EC2
+- Istanze EC2 con server SMTP, POP3, IMAP
+- Salvataggio dei dati su S3 e DynamoDB
+	- Cosa salvo su l'uno e cosa sull'altro?
+	- Replicazione di S3 come funziona rispetto alla creazione dei bucket? Già gestita o creo stesso oggetto in più bucket?
+	- Informazioni utenti
+- Elasticache
+	- Cosa vado a cachare?	

@@ -1,0 +1,186 @@
+package it.prms.greenmail.imap;
+
+import it.prms.amazon.utility.WrongTypeException;
+import it.prms.greenmail.store.FolderException;
+import it.prms.greenmail.store.MailFolder;
+import it.prms.greenmail.store.PuRoHierarchicalFolder;
+import it.prms.greenmail.store.PuRoStore;
+import it.prms.greenmail.user.PuRoMailUser;
+
+import java.util.Collection;
+import java.util.List;
+
+import com.amazonaws.AmazonClientException;
+import com.amazonaws.AmazonServiceException;
+import com.amazonaws.services.dynamodb.model.InternalServerErrorException;
+import com.amazonaws.services.dynamodb.model.ProvisionedThroughputExceededException;
+import com.amazonaws.services.dynamodb.model.ResourceNotFoundException;
+
+public class PuRoImapHostManager implements ImapConstants{
+
+    private PuRoStore store;
+    //TODO MailboxSubscriptions
+    //private MailboxSubscriptions subscriptions;
+	
+    public PuRoImapHostManager(PuRoStore store) {
+        this.store = store;
+        //TODO MailboxSubscriptions
+        //subscriptions = new MailboxSubscriptions();
+    }
+    
+    public PuRoStore getStore() {
+    	return store;
+    }
+	
+	public List getAllMessages() {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	
+	public char getHierarchyDelimiter() {
+		return HIERARCHY_DELIMITER_CHAR;
+	}
+
+	
+	public MailFolder getFolder(PuRoMailUser user, String mailboxName) {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	
+	public MailFolder getFolder(PuRoMailUser user, String mailboxName,
+			boolean mustExist) throws FolderException {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	
+	public PuRoHierarchicalFolder getInbox(PuRoMailUser user) throws FolderException {
+		String qualifiedMailboxName = getQualifiedMailboxName(user, INBOX_NAME);
+		store.addInMemoryFolderToRoot(user.getQualifiedMailboxName());
+		PuRoHierarchicalFolder inbox = store.getPop3Inbox(qualifiedMailboxName);
+		
+		if(inbox == null)
+		{
+			store.removeFolderAndParentViewer(store.getInMemoryFolder(getQualifiedMailboxName(user, ""))); //rimuove il viewer dalla cartella #mail.hash
+			throw new FolderException("Server Error: unable to load mailbox info");
+		}
+			
+		return inbox;
+	}
+
+    public void createPrivateMailAccount(PuRoMailUser user) throws FolderException { //richiamato unicamente da PuroMailUser.create()
+    }
+
+	/**
+	 * Crea una nuova mailbox nella folder specificata 
+	 * 
+	 * @param user, utente per cui creare una mailbox
+	 * @param mailboxName, nome assoluto da cui ricavare il parent corrispondente
+	 * @return oggetto mailbox appena creato, o null in caso di errore
+	 * @throws AuthorizationException
+	 * @throws FolderException
+	 * @throws ProvisionedThroughputExceededException
+	 * @throws InternalServerErrorException
+	 * @throws ResourceNotFoundException
+	 * @throws AmazonServiceException
+	 * @throws AmazonClientException
+	 * @throws WrongTypeException
+	 */
+	public MailFolder createMailbox(PuRoMailUser user, String mailboxName)
+			throws AuthorizationException, FolderException, ProvisionedThroughputExceededException, InternalServerErrorException, ResourceNotFoundException, AmazonServiceException, AmazonClientException, WrongTypeException {
+		
+		String complete = mailboxName;
+		int index =  complete.lastIndexOf(".");
+		String parent = complete.substring(0, index);
+		//se la cartella padre è aggiornata
+		if(store.folderIsUpdated(parent)){
+			//se la mailbox non esiste
+			if(store.getMailbox(mailboxName) == null){
+				store.createMailbox(store.getMailbox(parent), mailboxName, false);				
+			}else{
+				throw new FolderException("Folder already exists");
+			}
+		}
+		else{
+			//TODO aggiornare parent e poi creare nuova mailbox: done! potrebbe dare problemi
+			store.upgradePuRoFolder(store.getMailbox(parent));
+			store.createMailbox(store.getMailbox(parent), mailboxName, false);
+		}
+
+		return null;
+	}
+
+	
+	public void deleteMailbox(PuRoMailUser user, String mailboxName)
+			throws FolderException, AuthorizationException {
+		// TODO Auto-generated method stub
+		/*
+		 * controllo aggiornamento cartella, nel caso aggiorno!
+		 * Controllo che la mailbox esiste
+		 * la creo su dynamo
+		 * riaggiorno in memoria
+		 * 
+		 * posso lavorare sullo store
+		 */
+		
+	}
+
+	
+	public void renameMailbox(PuRoMailUser user, String oldMailboxName,
+			String newMailboxName) throws FolderException,
+			AuthorizationException {
+		// TODO Auto-generated method stub
+		
+	}
+
+	
+	public Collection listMailboxes(PuRoMailUser user, String mailboxPattern)
+			throws FolderException {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	
+	public Collection listSubscribedMailboxes(PuRoMailUser user,
+			String mailboxPattern) throws FolderException {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	
+	public void subscribe(PuRoMailUser user, String mailbox)
+			throws FolderException {
+		// TODO Auto-generated method stub
+		
+	}
+
+	
+	public void unsubscribe(PuRoMailUser user, String mailbox)
+			throws FolderException {
+		// TODO Auto-generated method stub
+		
+	}
+	
+    public String getQualifiedMailboxName(PuRoMailUser user, String mailboxName) {
+        String userNamespace = user.getQualifiedMailboxName(); //restituisce una stringa con dentro l'hash dell'email dell'utente
+
+        if ("INBOX".equalsIgnoreCase(mailboxName)) { //(*) stringa: "#mail.<HASH-EMAIL>.INBOX" (senza "<>")
+            return USER_NAMESPACE + HIERARCHY_DELIMITER + userNamespace +
+                    HIERARCHY_DELIMITER + INBOX_NAME;
+        }
+
+        if (mailboxName.startsWith(NAMESPACE_PREFIX)) { //(*) se il nome della mailbox comincia per "#" allora restituisce direttamente quella (si vede che è già nel formato voluto)
+            return mailboxName;
+        } else {
+            if (mailboxName.length() == 0) {
+                return USER_NAMESPACE + HIERARCHY_DELIMITER + userNamespace; //(*) stringa: #mail.<HASH-EMAIL> (senza "<>")
+            } else {
+                return USER_NAMESPACE + HIERARCHY_DELIMITER + userNamespace + 
+                        HIERARCHY_DELIMITER + mailboxName; //(*) stringa: #mail.<HASH-EMAIL>.<mailboxName> (senza "<>")
+            }
+        }
+    }
+
+}

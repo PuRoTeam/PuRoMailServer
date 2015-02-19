@@ -1,0 +1,996 @@
+package it.prms.greenmail.store;
+
+import it.prms.amazon.AttributeType;
+import it.prms.amazon.DynamoDB;
+import it.prms.amazon.MetaMail;
+import it.prms.amazon.S3;
+import it.prms.amazon.TableInfo;
+import it.prms.amazon.WrongTypeException;
+import it.prms.amazon.update.attribute.SingleUpdateAttribute;
+import it.prms.amazon.update.attribute.UpdateAttributeList;
+import it.prms.amazon.update.attribute.WrongActionException;
+import it.prms.greenmail.foedus.util.MsgRangeFilter;
+import it.prms.greenmail.imap.ImapConstants;
+import it.prms.greenmail.mail.MovingMessage;
+import it.prms.greenmail.util.GreenMailUtil;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+
+import javax.mail.Flags;
+import javax.mail.MessagingException;
+import javax.mail.internet.MimeMessage;
+import javax.mail.search.SearchTerm;
+
+import com.amazonaws.AmazonClientException;
+import com.amazonaws.AmazonServiceException;
+import com.amazonaws.services.dynamodb.model.AttributeAction;
+import com.amazonaws.services.dynamodb.model.AttributeValue;
+import com.amazonaws.services.dynamodb.model.ConditionalCheckFailedException;
+import com.amazonaws.services.dynamodb.model.InternalServerErrorException;
+import com.amazonaws.services.dynamodb.model.ProvisionedThroughputExceededException;
+import com.amazonaws.services.dynamodb.model.ResourceNotFoundException;
+
+public class PuRoHierarchicalFolder /*implements MailFolder*/ {
+	
+	private DynamoDB dynamoDB;
+	private S3 s3;
+	
+	private String name;
+	private long nextUid; 								//(*) ogni messaggio all'interno della STESSA Folder ha un identificativo univoco (ma non fra Folder differenti)
+	private PuRoHierarchicalFolder parent; 				//(*) genitore cartella
+	private ArrayList<PuRoHierarchicalFolder> children; //(*) collezione (ArrayList) di figli
+    private boolean isSelectable = false;
+    
+    private List<PuRoMessage> puroMessages = Collections.synchronizedList(new LinkedList<PuRoMessage>());
+    private long uidValidity;
+
+    private Date lastUpdate;
+    //private long timerInMillisec; //TODO sia la root che le cartelle "hash-mail" devono avere come timer il valore Long.MAX_VALUE, in modo da non scadere mai
+    
+    private int countViewer;
+        
+    /**
+     * Costruttore PuRoHierarchicalFolder completo
+     * @param parent
+     * @param name
+     * @param dynamoDB
+     * @param s3
+     */
+    public PuRoHierarchicalFolder(PuRoHierarchicalFolder parent, String name, DynamoDB dynamoDB, S3 s3)
+    {
+    	this.dynamoDB = dynamoDB;
+    	this.s3 = s3;
+        this.children = new ArrayList<PuRoHierarchicalFolder>();
+        this.parent = parent;
+        this.name = name;
+        this.nextUid = 1;
+        this.uidValidity = System.currentTimeMillis(); 	
+        
+        this.lastUpdate = new Date();
+        
+        this.countViewer = 0;
+    }
+    
+    /**
+     * Costruttore PuRoHierarchicalFolder incompleto: manca campo children
+     * @param parent
+     * @param name
+     * @param nextUid
+     * @param selectable
+     * @param dynamoDB
+     * @param s3
+     */
+    public PuRoHierarchicalFolder(PuRoHierarchicalFolder parent, String name, long nextUid, boolean selectable, DynamoDB dynamoDB, S3 s3)
+    {    	
+    	this.parent = parent;
+    	this.s3 = s3;    	
+    	this.name = name;
+    	this.nextUid = nextUid;
+    	this.children = new ArrayList<PuRoHierarchicalFolder>();
+    	this.isSelectable = selectable;
+    	this.dynamoDB = dynamoDB;
+    	this.uidValidity = System.currentTimeMillis(); 
+    	
+        this.lastUpdate = new Date();
+        
+        this.countViewer = 0;
+    }
+    
+    public synchronized int addViewer(){
+    	countViewer++;
+    	return countViewer;
+    }
+    
+    public synchronized int removeViewer(){
+    	if(countViewer > 0)
+    		countViewer--;
+    	return countViewer;
+    }
+    
+    public DynamoDB getDynamoDB(){    
+    	return dynamoDB;
+    }
+    
+	
+	public String getName() {
+		return name;
+	}
+
+    public String getFullName() {
+        return parent.getFullName() + ImapConstants.HIERARCHY_DELIMITER_CHAR + name;
+    }
+
+	
+	public Flags getPermanentFlags() {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	
+	public int getMessageCount() {
+		// TODO Auto-generated method stub
+		return 0;
+	}
+
+	
+	public int getRecentCount(boolean reset) {
+		// TODO Auto-generated method stub
+		return 0;
+	}
+
+	
+	public long getUidValidity() {
+		// TODO Auto-generated method stub
+		return 0;
+	}
+
+	
+	public int getFirstUnseen() {
+		// TODO Auto-generated method stub
+		return 0;
+	}
+
+	
+	public int getUnseenCount() {
+		// TODO Auto-generated method stub
+		return 0;
+	}
+
+	
+	public boolean isSelectable() {
+		return isSelectable;
+	}
+
+    public long getUidNext() {
+        return nextUid;
+    }
+    
+    public void deleteChild(String relativeName){
+    	PuRoHierarchicalFolder child = getChild(relativeName);
+    	if(child != null)
+    		this.children.remove(child);
+    }
+    
+    /**
+     * POP3: RSET
+     * 
+     * @return
+     */
+    public int resetDeletedFlag() 
+    {    	
+        int count = 0;
+        for(int i = 0; i < puroMessages.size(); i++) 
+        {
+        	PuRoMessage msg = (PuRoMessage) puroMessages.get(i);
+            Flags flags = msg.getFlags();
+            if (flags.contains(Flags.Flag.DELETED)) 
+            {
+                count++;
+                flags.remove(Flags.Flag.DELETED);
+            }
+        }
+        return count;
+    }
+    
+    /**
+     * La lista dei messaggi deve essere già caricata in memoria, altrimenti non ha senso specificare message number
+     * se retrieveCompleteMsg è true, allora recupero per ogni messaggio selezionato, tutti i suoi campi da dynamo e s3
+     * POP3: DELE, RETR, TOP
+     * 
+     * @param range
+     * @param retrieveCompleteMsg
+     * @return
+     * @throws FolderException
+     */
+	public List<PuRoMessage> getMessages(MsgRangeFilter range, boolean retrieveCompleteMsg) throws FolderException 
+	{
+		List<PuRoMessage> ret = new ArrayList<PuRoMessage>();
+		
+        for (int i = 0; i < puroMessages.size(); i++) 
+        {
+            if (range.includes(i+1)) //i + 1 in quanto i message number partono da 1 e non da 0 come negli array  
+            {           	
+				PuRoMessage puroMsg = puroMessages.get(i);
+				
+				Flags flags = puroMsg.getFlags();				
+				if (flags.contains(Flags.Flag.DELETED))
+					continue;
+				
+				if(retrieveCompleteMsg && !puroMsg.isSet()) //messaggio caricato parzialmente, ho solo uid e size
+				{ 		
+					PuRoMessage newPuroMsg = getSingleMessageFromDB(puroMsg.getUid());					
+					puroMessages.set(i, newPuroMsg);
+				}
+            	
+            	ret.add(puroMessages.get(i));    		            	
+            }
+                          
+        }
+        return ret;
+	}
+ 
+	/*//se retrieveCompleteMsg è true, allora recupero per ogni messaggio, tutti i suoi campi da dynamo e s3
+	//MAI USATA
+	public List<PuRoMessage> getMessages(boolean retrieveCompleteMsg) throws FolderException {		
+		try	{		
+			if(puroMessages.size() > 0)	{ //lista messaggi già caricata (verificare se parzialmente o in maniera completa)
+				
+				List<PuRoMessage> nonDeletedMsg = new ArrayList<PuRoMessage>();
+								
+				for (int i = 0; i < puroMessages.size(); i++) {					
+					PuRoMessage puroMsg = puroMessages.get(i);
+					
+					Flags flags = puroMsg.getFlags();				
+					if (flags.contains(Flags.Flag.DELETED))
+						continue;
+					
+					if(retrieveCompleteMsg && !puroMsg.isSet()) //messaggio caricato parzialmente, ho solo uid e size
+					{
+						PuRoMessage newPuroMsg = getSingleMessageFromDB(puroMsg.getUid());					
+						puroMessages.set(i, newPuroMsg);
+					}
+					
+					nonDeletedMsg.add(puroMsg);
+				}
+				
+				return nonDeletedMsg;
+			} else { //lista non caricata
+				if(retrieveCompleteMsg)
+				{
+					String folderName = this.getFullName();
+					List<Map<String, AttributeValue>> items = dynamoDB.retrieveMultipleMetaMailItem(folderName);
+					
+					Iterator<Map<String, AttributeValue>> iterator = items.iterator();
+					while(iterator.hasNext())
+					{
+						Map<String, AttributeValue> curMap = iterator.next();
+						MetaMail metaMail = new MetaMail(curMap);
+						
+						MimeMessage mimeMsg = s3.downloadObjectFromBucket(metaMail.getBucket(), metaMail.getFilename());					
+						PuRoMessage puroMsg = new PuRoMessage(mimeMsg, metaMail);
+						
+						puroMessages.add(puroMsg);
+					}
+				}
+				else
+					getUidAndSizeOnly();
+			}		
+		} catch (ProvisionedThroughputExceededException e) {
+			throw new FolderException("Server Error");
+		} catch (InternalServerErrorException e) {
+			throw new FolderException("Server Error");
+		} catch (ResourceNotFoundException e) {
+			throw new FolderException("Server Error");
+		} catch (AmazonServiceException e) {
+			System.out.println("AmazonServiceException: request to Amazon S3 was rejected.");
+            System.out.println("Error Message:    " + e.getMessage());
+            System.out.println("HTTP Status Code: " + e.getStatusCode());
+            System.out.println("AWS Error Code:   " + e.getErrorCode());
+            System.out.println("Error Type:       " + e.getErrorType());
+            System.out.println("Request ID:       " + e.getRequestId());
+            throw new FolderException("Server Error");
+        } catch (AmazonClientException e) {
+            System.out.println("AmazonClientException: Client encountered a serious internal problem while trying to communicate with S3.");
+            System.out.println("Error Message: " + e.getMessage());
+            throw new FolderException("Server Error");
+		} catch (WrongTypeException e) {
+			throw new FolderException("Server Error");
+		} catch (MessagingException e) {
+			throw new FolderException("Server Error");
+		} catch (IOException e) {
+			throw new FolderException("Server Error");
+		}
+		
+		
+		return puroMessages;
+	}*/
+
+	public PuRoMessage getSingleMessageFromDB(long uid) throws FolderException{
+		
+		PuRoMessage msg = null;		
+		Map<String, AttributeValue> item;
+		
+		try {
+			item = dynamoDB.retrieveSingleMetaMailItem(this.getFullName(), uid);
+
+			MetaMail metaMail = new MetaMail(item);
+		
+			MimeMessage mimeMsg = s3.downloadObjectFromBucket(metaMail.getBucket(), metaMail.getFilename());
+			msg = new PuRoMessage(mimeMsg, metaMail);
+		
+		} catch (ProvisionedThroughputExceededException e) {
+			throw new FolderException("Server Error");
+		} catch (InternalServerErrorException e) {
+			throw new FolderException("Server Error");
+		} catch (ResourceNotFoundException e) {
+			throw new FolderException("Server Error");
+		} catch (AmazonServiceException e) {
+			throw new FolderException("Server Error");
+		} catch (AmazonClientException e) {
+			throw new FolderException("Server Error");
+		} catch (WrongTypeException e) {
+			throw new FolderException("Server Error");
+		} catch (MessagingException e) {
+			throw new FolderException("Server Error");
+		} catch (IOException e) {
+			throw new FolderException("Server Error");
+		}		
+		
+		return msg;
+	}
+    
+	/**
+	 * POP3: LIST, UIDL
+	 * 
+	 * @param range
+	 * @return
+	 * @throws FolderException
+	 */
+	public List<PuRoMessage> getUidAndSizeOnly(MsgRangeFilter range) throws FolderException
+    {        
+		List<PuRoMessage> ret = new ArrayList<PuRoMessage>();
+		
+        for (int i = 0; i < puroMessages.size(); i++) 
+        {
+        	PuRoMessage puroMsg = puroMessages.get(i);
+        	
+			Flags flags = puroMsg.getFlags();				
+			if (flags.contains(Flags.Flag.DELETED))
+				continue;        	
+        	
+            if (range.includes(i+1))       
+                ret.add(puroMsg);            
+        }
+        return ret; 	
+    }
+    
+	/**
+	 * POP3: STAT, LIST, UIDL
+	 * 
+	 * @return
+	 * @throws FolderException
+	 */
+    public List<PuRoMessage> getUidAndSizeOnly() throws FolderException
+    {    	
+    	try 
+    	{   
+    		if(puroMessages.size() > 0) 
+    		{
+				List<PuRoMessage> nonDeletedMsg = new ArrayList<PuRoMessage>();
+				
+				for (int i = 0; i < puroMessages.size(); i++) 
+				{					
+					PuRoMessage puroMsg = puroMessages.get(i);
+					
+					Flags flags = puroMsg.getFlags();				
+					if (flags.contains(Flags.Flag.DELETED))
+						continue;
+					
+					nonDeletedMsg.add(puroMsg);
+				}
+				
+				return nonDeletedMsg;
+    		}    			   		
+    		
+    		String folderName = this.getFullName();
+    	
+    		String[] attributeToGet = new String[]{TableInfo.TMetaUidRange.toString(), TableInfo.TMetaSize.toString()};    	
+    	
+    		List<Map<String, AttributeValue>> items = dynamoDB.retrieveMultipleMetaMailItem(folderName, attributeToGet);
+			
+    		Iterator<Map<String, AttributeValue>> iterator = items.iterator();
+    		while(iterator.hasNext())
+    		{
+    			Map<String, AttributeValue> curMap = iterator.next();
+    			
+    			AttributeValue attrUid = curMap.get(TableInfo.TMetaUidRange.toString());
+    			AttributeValue attrSize = curMap.get(TableInfo.TMetaSize.toString());
+    			
+    			if(attrUid != null && attrSize != null)
+    			{
+    				try
+    				{
+    					long uid =  Long.parseLong(attrUid.getN());
+    					int size = Integer.parseInt(attrSize.getN());
+    					
+    					PuRoMessage msg = new PuRoMessage(uid, size);
+    					puroMessages.add(msg);
+    				}
+    				catch(NumberFormatException e)
+    				{ continue; } //prossima iterazione
+    			}    			
+    		}
+		} 
+    	catch (ProvisionedThroughputExceededException e) 
+    	{ throw new FolderException("Server Error"); } 
+    	catch (InternalServerErrorException e) 
+		{ throw new FolderException("Server Error"); }
+    	catch (ResourceNotFoundException e)
+		{ throw new FolderException("Server Error"); }
+    	catch (AmazonServiceException e) 
+		{ throw new FolderException("Server Error"); }
+    	catch (AmazonClientException e) 
+		{ throw new FolderException("Server Error"); }
+    	catch (WrongTypeException e) 
+		{ throw new FolderException("Server Error"); }
+    	
+    	return puroMessages;
+    }
+    
+    public void setNextUid(long nextUid) {
+		this.nextUid = nextUid;
+	}
+
+	public void setParent(PuRoHierarchicalFolder parent) {
+		this.parent = parent;
+	}
+
+	public void setChildren(ArrayList<PuRoHierarchicalFolder> children) {
+		this.children = children;
+	}
+
+	public void setLastUpdate(Date lastUpdate) {
+		this.lastUpdate = lastUpdate;
+	}
+
+	/**
+	 * SMTP: DATA
+	 * 
+	 * @param mail
+	 * @throws FolderException
+	 */
+    public void store(MovingMessage mail) throws FolderException { //(*) richiamato da deliver(MovingMessage msg)
+        store(mail.getMessage());
+    }
+    
+    public void store(MimeMessage message) throws FolderException { //(*) richiamato da deliver(MimeMessage msg) e da HierarchicalFolder.store(MovineMessage) (funzione sopra)
+        Date internalDate = new Date();
+        Flags flags = new Flags();
+        appendMessage(message, flags, internalDate); //(*) crea un nuovo messaggio di tipo StoredMessage con flag "RECENT" e lo salva nella Folder segnalando l'evento a tutti i listener registrati
+    }
+    
+	public long appendMessage(MimeMessage message, Flags flags, Date internalDate) throws FolderException {
+		long folderNextUID = -1;
+		MetaMail metaMail = new MetaMail();
+		
+		try	{
+			//Recupero UID ed incremento
+			String[] attributeToGet = {TableInfo.TFolderNextUID.toString()}; //visto che ho bisogno solo del campo nextUID, nella query richiedo solo quello
+			Map<String, AttributeValue> folderItem = dynamoDB.retrieveFolderItem(this.getFullName(), attributeToGet);
+			
+			if(folderItem.get(TableInfo.TFolderNextUID.toString()) == null) {
+				throw new FolderException("Server Error");
+			}
+			else {
+				folderNextUID = Long.parseLong(folderItem.get(TableInfo.TFolderNextUID.toString()).getN());
+				
+				nextUid = folderNextUID; //giusto eseguire due volte
+								
+				metaMail.setUid(folderNextUID); //questa operazione devoe essere eseguita prima di incrementare il nextUID, perchè nextUID non deve puntare a nessun messaggio corrente
+				metaMail.setFolder(this.getFullName());
+				metaMail.setHeader(GreenMailUtil.getHeaders(message));
+				metaMail.setDate(internalDate);
+				metaMail.setFlags(flags);
+				metaMail.setBucket(s3.getCurrentBucket());
+				metaMail.setSize(message.getSize());
+				metaMail.setFilename(s3.generateFileKey(metaMail));
+								
+				folderNextUID++;
+				UpdateAttributeList updateAttributeList = new UpdateAttributeList();
+				updateAttributeList.put("nextUID", new SingleUpdateAttribute(folderNextUID, AttributeAction.PUT));
+				dynamoDB.updateAttributeList("Folder", this.getFullName(), AttributeType.StringType, null, null, updateAttributeList);
+				
+				nextUid = folderNextUID; //giusto eseguire due volte
+								
+				s3.uploadFileToBucket(message,metaMail.getBucket(),metaMail.getFilename());
+				
+			}
+			
+		//se si verificasse un'eccezione in updateAttributeList, non è un problema se c'è un buco nei valori di nextUID, quindi possiamo non disfare l'ultima operazione
+		//se si verificasse un'eccezione in uploadFileToBucket, allora l'oggetto non è stato uploadato, quindi niente da disfare	
+		} catch (ProvisionedThroughputExceededException e) {
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		} catch (InternalServerErrorException e) {
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		} catch (ResourceNotFoundException e) {
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		} catch (AmazonServiceException e) {
+			System.out.println("AmazonServiceException: request to Amazon S3 was rejected.");
+            System.out.println("Error Message:    " + e.getMessage());
+            System.out.println("HTTP Status Code: " + e.getStatusCode());
+            System.out.println("AWS Error Code:   " + e.getErrorCode());
+            System.out.println("Error Type:       " + e.getErrorType());
+            System.out.println("Request ID:       " + e.getRequestId());
+            
+            e.printStackTrace();            
+            throw new FolderException("Server Error");
+        } catch (AmazonClientException e) {
+            System.out.println("AmazonClientException: Client encountered a serious internal problem while trying to communicate with S3.");
+            System.out.println("Error Message: " + e.getMessage());
+            
+            e.printStackTrace();            
+            throw new FolderException("Server Error");
+		} catch (WrongTypeException e) {
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		} catch (WrongActionException e) {
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		}	catch (NumberFormatException e) {
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		} catch (IOException e) {
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		} catch (MessagingException e) {
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		}
+		
+		try {
+			//Scrittura entry nella tabella "MetaMail"
+			dynamoDB.addItem(TableInfo.TableMetaMail.toString(), dynamoDB.newMailItem(metaMail));
+			
+			PuRoMessage newMsg = new PuRoMessage(message, metaMail);				
+			puroMessages.add(newMsg);
+			
+		//se si verificasse un'eccezione in addItem, devo disfare l'operazione su S3
+		} catch (ProvisionedThroughputExceededException e) {
+			s3.deleteObjectFromBuckets(metaMail.getBucket(), metaMail.getFilename()); 
+			e.printStackTrace();			
+			throw new FolderException("Server Error");
+		} catch (InternalServerErrorException e) {
+			s3.deleteObjectFromBuckets(metaMail.getBucket(), metaMail.getFilename()); 
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		} catch (ResourceNotFoundException e) {
+			s3.deleteObjectFromBuckets(metaMail.getBucket(), metaMail.getFilename()); 
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		} catch (AmazonServiceException e) {
+			System.out.println("AmazonServiceException: request to Amazon S3 was rejected.");
+            System.out.println("Error Message:    " + e.getMessage());
+            System.out.println("HTTP Status Code: " + e.getStatusCode());
+            System.out.println("AWS Error Code:   " + e.getErrorCode());
+            System.out.println("Error Type:       " + e.getErrorType());
+            System.out.println("Request ID:       " + e.getRequestId());
+            
+			s3.deleteObjectFromBuckets(metaMail.getBucket(), metaMail.getFilename()); 
+			
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+        } catch (AmazonClientException e) {
+            System.out.println("AmazonClientException: Client encountered a serious internal problem while trying to communicate with S3.");
+            System.out.println("Error Message: " + e.getMessage());
+            
+			s3.deleteObjectFromBuckets(metaMail.getBucket(), metaMail.getFilename()); 
+			
+			e.printStackTrace();
+			throw new FolderException("Server Error");
+		}		
+		
+		return folderNextUID;
+	}
+    
+	/*
+	//versione con gestione unita delle eccezioni
+	public long appendMessage(MimeMessage message, Flags flags,	Date internalDate) {
+		long folderUID = -1;
+		MetaMail metaMail = new MetaMail();
+		try {			
+			//Recupero UID ed incremento
+			String[] attributeToGet = {TableInfo.TFolderNextUID.toString()}; //visto che ho bisogno solo del campo nextUID, nella query richiedo solo quello
+			Map<String, AttributeValue> folderItem = dynamoDB.retrieveFolderItem(this.getFullName(), attributeToGet);
+			
+			if(folderItem.get(TableInfo.TFolderNextUID.toString()) != null)
+			{
+				folderUID = Long.parseLong(folderItem.get(TableInfo.TFolderNextUID.toString()).getN());
+				
+				folderUID++;
+				UpdateAttributeList updateAttributeList = new UpdateAttributeList();
+				updateAttributeList.put("nextUID", new SingleUpdateAttribute(folderUID, AttributeAction.PUT));
+				dynamoDB.updateAttributeList("Folder", this.getFullName(), AttributeType.StringType, null, null, updateAttributeList);
+				nextUid++;
+								
+				//Recupero altri campi della mail
+				metaMail.setUid(folderUID);
+				metaMail.setFolder(this.getFullName());
+				metaMail.setHeader(GreenMailUtil.getHeaders(message));
+				metaMail.setDate(internalDate);
+				metaMail.setFlags(flags);
+				metaMail.setBucket(s3.getCurrentBucket());
+				metaMail.setSize(message.getSize());
+				metaMail.setFilename(s3.generateFileKey(metaMail));
+				
+				s3.uploadFileToBucket(message,metaMail.getBucket(),metaMail.getFilename());
+				
+				//Scrittura entry nella tabella "MetaMail"
+				dynamoDB.addItem(TableInfo.TableMetaMail.toString(), dynamoDB.newMailItem(metaMail));
+				
+				PuRoMessage newMsg = new PuRoMessage(message, metaMail);				
+				puroMessages.add(newMsg);				
+			}
+		} catch (ProvisionedThroughputExceededException e) {
+			e.printStackTrace();
+		} catch (InternalServerErrorException e) {
+			e.printStackTrace();
+		} catch (ResourceNotFoundException e) {
+			e.printStackTrace();
+		} catch (AmazonServiceException e) {
+			System.out.println("AmazonServiceException: request to Amazon S3 was rejected.");
+            System.out.println("Error Message:    " + e.getMessage());
+            System.out.println("HTTP Status Code: " + e.getStatusCode());
+            System.out.println("AWS Error Code:   " + e.getErrorCode());
+            System.out.println("Error Type:       " + e.getErrorType());
+            System.out.println("Request ID:       " + e.getRequestId());
+        } catch (AmazonClientException e) {
+            System.out.println("AmazonClientException: Client encountered a serious internal problem while trying to communicate with S3.");
+            System.out.println("Error Message: " + e.getMessage());
+		} catch (WrongTypeException e) {
+			e.printStackTrace();
+		} catch (WrongActionException e) {
+			e.printStackTrace();
+		} catch (IOException e) {
+			e.printStackTrace();
+		} catch (MessagingException e) {
+			e.printStackTrace();
+		} catch (NumberFormatException e) {
+			e.printStackTrace();
+		}
+		
+
+		return folderUID;
+	}*/
+	
+	/**
+	 * POP3: QUIT
+	 * Deve essere richiamata solo con QUIT (a cui segue la chiusura della connessione), perchè altrimenti i message number verrebbero confusi
+	 * 
+	 * @throws FolderException
+	 */
+	public void expunge() throws FolderException {
+		
+		for (int i = 0; i < puroMessages.size(); i++) {
+			PuRoMessage message = (PuRoMessage) puroMessages.get(i);
+			
+			if (message.getFlags().contains(Flags.Flag.DELETED)) {
+				
+				Map<String, AttributeValue> item = null;
+				
+				try {
+            		String delFolder = this.getFullName();
+            		long delUid = message.getUid();
+            		item = dynamoDB.deleteMetaMailItem(delFolder, delUid);
+            		
+				//se si fosse verificata un'eccezione in deleteMetaMailItem, l'elemento non è stato cancellato
+            	//se l'item non esiste, NON viene generata un'eccezione	
+				} catch (ProvisionedThroughputExceededException e) { //sarebbe da fare l'update del throughput (da codice) e riprovare l'operazione.
+					e.printStackTrace();
+					throw new FolderException("Server Error");
+				} catch (ConditionalCheckFailedException e) { //non usando il delete condizionale, non viene lanciata mai
+					e.printStackTrace();
+					throw new FolderException("Server Error");
+				} catch (InternalServerErrorException e) {
+					e.printStackTrace();
+					throw new FolderException("Server Error");
+				} catch (ResourceNotFoundException e) { //viene lanciata solo se non esiste una tabella col nome specificato, quindi mai in questo caso
+					e.printStackTrace();
+					throw new FolderException("Server Error");
+				} catch (AmazonServiceException e) {
+					System.out.println("AmazonServiceException: request to Amazon S3 was rejected.");
+		            System.out.println("Error Message:    " + e.getMessage());
+		            System.out.println("HTTP Status Code: " + e.getStatusCode());
+		            System.out.println("AWS Error Code:   " + e.getErrorCode());
+		            System.out.println("Error Type:       " + e.getErrorType());
+		            System.out.println("Request ID:       " + e.getRequestId());
+		            e.printStackTrace();
+		            throw new FolderException("Server Error");
+		        } catch (AmazonClientException e) {
+		            System.out.println("AmazonClientException: Client encountered a serious internal problem while trying to communicate with S3.");
+		            System.out.println("Error Message: " + e.getMessage());
+		            e.printStackTrace();
+		            throw new FolderException("Server Error");
+				} catch (WrongTypeException e) {
+					e.printStackTrace();
+					throw new FolderException("Server Error");
+				}	
+								
+				try {
+					AttributeValue attrBucket = item.get(TableInfo.TMetaBucket.toString());
+					AttributeValue attrFileName = item.get(TableInfo.TMetaFileName.toString());
+					
+					if(attrBucket != null && attrFileName != null){
+						s3.deleteObjectFromBuckets(attrBucket.getS(), attrFileName.getS());
+					}
+					//else: esisteva l'oggetto in dynamoDB ma non in S3. Non dovrebbe verificarsi mai
+					
+					// TODO expungeMessage(i + 1); ricordarsi listeners
+					puroMessages.remove(i);
+					// TODO aggiornare lo stato della cartella: 1.numero messaggi 2.data ultima modifica
+					//lastUpdate = new Date();		
+				
+				//c'è stato un problema nell'eliminazione dell'oggetto da s3, quindi riaggiungo l'equivalente (prima rimosso) in dynamo
+				//se l'oggetto non esiste su S3 NON viene lanciata un'eccezione, quindi non è possibile catturare questo caso
+				} catch (AmazonServiceException e) {
+					System.out.println("AmazonServiceException: request to Amazon S3 was rejected.");
+		            System.out.println("Error Message:    " + e.getMessage());
+		            System.out.println("HTTP Status Code: " + e.getStatusCode());
+		            System.out.println("AWS Error Code:   " + e.getErrorCode());
+		            System.out.println("Error Type:       " + e.getErrorType());
+		            System.out.println("Request ID:       " + e.getRequestId());
+		            
+		            dynamoDB.addItem(TableInfo.TableMetaMail.toString(), item);
+		            
+		            e.printStackTrace();
+		            throw new FolderException("Server Error");
+		        } catch (AmazonClientException e) {
+		            System.out.println("AmazonClientException: Client encountered a serious internal problem while trying to communicate with S3.");
+		            System.out.println("Error Message: " + e.getMessage());
+		            
+		            dynamoDB.addItem(TableInfo.TableMetaMail.toString(), item);
+		            
+		            e.printStackTrace();
+		            throw new FolderException("Server Error");
+				}
+			}
+		}
+	}	
+	
+	/*//POP3: QUIT
+	//versione con gestione unita eccezioni
+	public void expunge() throws FolderException {
+		
+		for (int i = 0; i < puroMessages.size(); i++) {
+            PuRoMessage message = (PuRoMessage) puroMessages.get(i);
+            if (message.getFlags().contains(Flags.Flag.DELETED)) {
+            	
+            	try {
+            		
+					//item = dynamoDB.deleteItem(TableInfo.TableMetaMail.toString(), this.getFullName(), AttributeType.StringType, Long.toString(message.getUid()), AttributeType.StringType);
+            		String delFolder = this.getFullName();
+            		long delUid = message.getUid();
+            		Map<String, AttributeValue> item = dynamoDB.deleteMetaMailItem(delFolder, delUid);
+            		
+					AttributeValue attrBucket = item.get(TableInfo.TMetaBucket.toString());
+					AttributeValue attrFileName = item.get(TableInfo.TMetaFileName.toString());
+					
+					if(attrBucket != null && attrFileName != null){
+						s3.deleteObjectFromBuckets(attrBucket.getS(), attrFileName.getS());
+					}
+					// TODO expungeMessage(i + 1); ricordarsi listeners
+					// TODO eliminare il messaggio i-esimo dalla memoria
+					puroMessages.remove(i);
+					// TODO aggiornare lo stato della cartella: 1.numero messaggi 2.data ultima modifica
+					//lastUpdate = new Date();
+					
+				} catch (ProvisionedThroughputExceededException e) {
+					throw new FolderException("Server Error");
+				} catch (ConditionalCheckFailedException e) {
+					throw new FolderException("Server Error");
+				} catch (InternalServerErrorException e) {
+					throw new FolderException("Server Error");
+				} catch (ResourceNotFoundException e) {
+					throw new FolderException("Server Error");
+				} catch (AmazonServiceException e) {
+					System.out.println("AmazonServiceException: request to Amazon S3 was rejected.");
+		            System.out.println("Error Message:    " + e.getMessage());
+		            System.out.println("HTTP Status Code: " + e.getStatusCode());
+		            System.out.println("AWS Error Code:   " + e.getErrorCode());
+		            System.out.println("Error Type:       " + e.getErrorType());
+		            System.out.println("Request ID:       " + e.getRequestId());
+		            throw new FolderException("Server Error");
+		        } catch (AmazonClientException e) {
+		            System.out.println("AmazonClientException: Client encountered a serious internal problem while trying to communicate with S3.");
+		            System.out.println("Error Message: " + e.getMessage());
+		            throw new FolderException("Server Error");
+				} catch (WrongTypeException e) {
+					throw new FolderException("Server Error");
+				}
+            }
+        }
+	}*/
+
+	public void deleteAllMessages() {
+		// TODO Auto-generated method stub
+	}
+	
+	public void addListener(FolderListener listener) {
+		// TODO Auto-generated method stub
+
+	}
+
+	
+	public void removeListener(FolderListener listener) {
+		// TODO Auto-generated method stub
+
+	}
+	
+	public SimpleStoredMessage getMessage(long uid) {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	
+	public long[] getMessageUids() {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	
+	public long[] search(SearchTerm searchTerm) {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	
+	public void copyMessage(long uid, MailFolder toFolder)
+			throws FolderException {
+		// TODO Auto-generated method stub
+
+	}
+
+	
+	public void setFlags(Flags flags, boolean value, long uid,
+			FolderListener silentListener, boolean addUid)
+			throws FolderException {
+		// TODO Auto-generated method stub
+
+	}
+
+	
+	public void replaceFlags(Flags flags, long uid,
+			FolderListener silentListener, boolean addUid)
+			throws FolderException {
+		// TODO Auto-generated method stub
+
+	}
+
+	public int getMsn(long uid) throws FolderException 
+	{
+        for (int i = 0; i < puroMessages.size(); i++) 
+        {
+            PuRoMessage message = (PuRoMessage) puroMessages.get(i);
+            
+            if (message.getUid() == uid)            
+                return i + 1;
+            
+        }
+        throw new FolderException("No such message.");
+	}
+
+	
+	public void signalDeletion() {
+		// TODO Auto-generated method stub
+
+	}
+	
+	/*
+	//NON USATA
+	public List getNonDeletedMessages() {
+
+		List ret = new ArrayList();
+		Map<String, AttributeValue> item;
+		MetaMail mail = null;
+		
+        for (int i = 0; i < puroMessages.size(); i++) {
+            PuRoMessage message = (PuRoMessage) puroMessages.get(i);
+            if (!message.getFlags().contains(Flags.Flag.DELETED)) {
+            	try {
+					item = dynamoDB.retrieveItem("Metamail", this.getFullName(), AttributeType.StringType, Long.toString(message.getUid()) ,AttributeType.StringType);
+					mail = new MetaMail(item);
+					ret.add(s3.downloadObjectFromBucket(mail.getBucket(), mail.getFilename()));
+					// TODO 
+					//ret.add(message);
+					
+				} catch (ProvisionedThroughputExceededException e) {
+					e.printStackTrace();
+				} catch (InternalServerErrorException e) {
+					e.printStackTrace();
+				} catch (ResourceNotFoundException e) {
+					e.printStackTrace();
+				} catch (AmazonServiceException e) {
+					System.out.println("AmazonServiceException: request to Amazon S3 was rejected.");
+		            System.out.println("Error Message:    " + e.getMessage());
+		            System.out.println("HTTP Status Code: " + e.getStatusCode());
+		            System.out.println("AWS Error Code:   " + e.getErrorCode());
+		            System.out.println("Error Type:       " + e.getErrorType());
+		            System.out.println("Request ID:       " + e.getRequestId());
+		        } catch (AmazonClientException e) {
+		            System.out.println("AmazonClientException: Client encountered a serious internal problem while trying to communicate with S3.");
+		            System.out.println("Error Message: " + e.getMessage());
+				} catch (WrongTypeException e) {
+					e.printStackTrace();
+				} catch (MessagingException e) {
+					e.printStackTrace();
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+            }
+        }
+        return ret;
+	}*/
+
+
+	public PuRoHierarchicalFolder getChild(String childName) {
+        Iterator<PuRoHierarchicalFolder> iterator = children.iterator();
+        while (iterator.hasNext()) { //(*) si scorre tutti i figli
+        	PuRoHierarchicalFolder child = iterator.next();
+            if (child.getName().equalsIgnoreCase(childName)) {
+                return child;
+            }
+        }
+        return null;
+	}
+
+
+	public ArrayList<PuRoHierarchicalFolder> getChildren() {
+		return children;
+	}
+
+
+	public void setSelectable(boolean selectable) {
+		// TODO Auto-generated method stub
+		
+	}
+
+
+	public PuRoHierarchicalFolder getParent() {
+		return parent;
+	}
+
+
+	public void setName(String newName) {
+		// TODO Auto-generated method stub
+		
+	}
+
+	public Date getLastUpdate()
+	{
+		return lastUpdate;
+	}
+	
+
+	
+//	//se false, la cartella è da aggiornare
+//	public boolean isUpdated(){
+//		
+//		Date currentDate = new Date();
+//		long difference = currentDate.getTime() - lastUpdate.getTime();
+//		
+//		if(difference >= timerInMillisec)
+//			return false;
+//		else 
+//			return true;
+//	}
+	
+}

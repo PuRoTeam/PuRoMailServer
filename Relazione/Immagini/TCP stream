@@ -1,0 +1,66 @@
+## INVIO DELLA MAIL
+
+220 ip-10-226-125-39/10.226.125.39 GreenMail SMTP Service Ready
+EHLO [192.168.1.3]
+250-ip-10-226-125-39/10.226.125.39
+250-AUTH=LOGIN
+250-AUTH PLAIN
+250 SIZE
+MAIL FROM:<claudio@puro-mail.tk> SIZE=373
+250 OK
+RCPT TO:<damiano@puro-mail.tk>
+250 OK
+DATA
+354 Start mail input; end with <CRLF>.<CRLF>
+Message-ID: <51081621.1080302@puro-mail.tk>
+Date: Tue, 29 Jan 2013 19:34:09 +0100
+From: claudio <claudio@puro-mail.tk>
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:17.0) Gecko/20130110 Thunderbird/17.0.2
+MIME-Version: 1.0
+To: damiano@puro-mail.tk
+Subject: test
+Content-Type: text/plain; charset=ISO-8859-15; format=flowed
+Content-Transfer-Encoding: 7bit
+
+test
+.
+250 OK
+QUIT
+221 ip-10-226-125-39/10.226.125.39 Service closing transmission channel
+
+## Errore get mail
+
++OK POP3 GreenMail Server ready
+CAPA
+-ERR Command not recognized
+USER damiano
++OK
+PASS tanknabu
++OK
+STAT
++OK 1 6
+LIST
++OK
+1 6
+.
+UIDL
++OK
+1 27505
+.
+RETR 1
+-ERR it.prms.greenmail.store.FolderException: Server Error: PuRo unable to retrieve message
+
+## tutto ok
+
++OK POP3 GreenMail Server ready
+CAPA
+-ERR Command not recognized
+USER damiano
++OK
+PASS tanknabu
++OK
+STAT
++OK 0 0
+QUIT
++OK bye see you soon
+ 

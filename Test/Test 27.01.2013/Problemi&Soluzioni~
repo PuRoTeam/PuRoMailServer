@@ -1,0 +1,17 @@
+###################### TEST-16/01/13 - 17.30-->18.30 ###########################
+
+				UP					DOWN
+
+CPU				80%					20%
+NETIN			1.500.000			500.000
+NETOUT			2.000.000			1.000.000
+
+LATENCY			5sec				2sec
+
+Dall'analisi dei risultati, credo che le soglie impostate in modo errato sono:
+
+NETIN 	-> DOWN 	-> da 500.000 a 250.000
+NETOUT 	-> DOWN 	-> da 1.000.000 a 500.000 (or lower)
+
+################################################################################
+
